@@ -238,11 +238,14 @@ class GpioEncoder(AbstractEncoder):
         if gpio_pin is None:
             raise ValueError('The encoder input pin must be a valid InputPin.')
 
+        self.debug = debug
         self.counter = 0
         self.direction = 0
         self.pin = gpio_pin
         self.debounce_ns:int = debounce_ns
         self.debounce_time:int = 0
+        if self.debounce_ns > 0:
+            logger.warn("GpioEncoder debounce_ns will be ignored.")
 
     def _cb(self, pin_number:int, pin_state:int):
         """
@@ -250,14 +253,13 @@ class GpioEncoder(AbstractEncoder):
         :pin_number: int the pin number that generated the interrupt.
         :pin_state: int the state of the pin
         """
-        now = time.time_ns()
-        if now > self.debounce_time:
-            self.counter += self.direction
-            self.debounce_time = now + self.debounce_ns
+        self.counter += self.direction
+
             
     def start_ticks(self):
         # configure GPIO pin
         self.pin.start(on_input=self._cb, edge=PinEdge.RISING)
+        logger.info(f'GpioEncoder on InputPin "RPI_GPIO.{self.pin.pin_scheme_str}.{self.pin.pin_number}" started.')
 
 
     def poll_ticks(self, direction:int):  
@@ -266,10 +268,12 @@ class GpioEncoder(AbstractEncoder):
         direction: 1 if forward, -1 if reverse, 0 if stopped.
         return: updated encoder ticks
         """
-        self.direction = direction              
+        self.direction = direction
+
 
     def stop_ticks(self):
         self.pin.stop()          
+        logger.info(f'GpioEncoder on InputPin "RPI_GPIO.{self.pin.pin_scheme_str}.{self.pin.pin_number}" stopped.')
 
     def get_ticks(self, encoder_index:int=0) -> int:
         """
@@ -359,7 +363,7 @@ class Tachometer:
             self.encoder.poll_ticks(self.direction)
             self.ticks = self.encoder.get_ticks()
             if self.debug and self.ticks != lastTicks:
-                print("tachometer: t = {}, r = {}, ts = {}".format(self.ticks, self.ticks / self.ticks_per_revolution, timestamp))
+                logger.info("tachometer: t = {}, r = {}, ts = {}".format(self.ticks, self.ticks / self.ticks_per_revolution, timestamp))
 
     def update(self):
         """
@@ -386,6 +390,9 @@ class Tachometer:
 
     def run(self, throttle:float=1.0, timestamp:float=None) -> Tuple[float, float]:
         if self.running:
+            # update throttle for next poll()
+            self.throttle = throttle
+            self.timestamp = timestamp
             self.poll(throttle, timestamp)
 
             # return (revolutions, timestamp)
