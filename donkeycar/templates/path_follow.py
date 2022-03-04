@@ -13,6 +13,29 @@ Options:
     --js               Use physical joystick.
     -f --file=<file>   A text file containing paths to tub files, one per line. Option may be used more than once.
     --meta=<key:value> Key/Value strings describing describing a piece of meta data about this drive. Option may be used more than once.
+
+Starts in user mode.
+- The user flow to 'train' a path.   
+  - start "python manage.py drive" 
+  - This starts in user mode; so user is in manual drive mode 
+    driving records path waypoints.
+  - drive to record a path; make the start and end close to each other.
+  - if you don't like path, select the reset button and it will
+    reset the origin _AND_ erase the path from memory.  MOve the
+    vehicle back to where the physical origin is and start driving
+    again to record a new path.
+  - if you like the path, select the save button to save it. 
+- The user flow for autopilot:  
+  - record or load a path (select load button) 
+  - select auto-pilot mode using joystick or web ui.  The
+    vehicle will start trying to follow the recorded path.
+  - switch back user model to stop autopilot.
+  - to restart using the saved path; 
+    - select reset button; this will erase path and reset origin 
+    - select load button to load path
+    - put the car back at the physical origin.
+
+
 """
 import os
 import sys
@@ -36,9 +59,8 @@ from docopt import docopt
 import numpy as np
 
 import donkeycar as dk
-from donkeycar.parts.controller import WebFpv, get_js_controller, LocalWebController, JoystickController
-from donkeycar.parts.actuator import PCA9685, PWMSteering, PWMThrottle
-from donkeycar.parts.path import Path, PathPlot, CTE, PID_Pilot, PlotCircle, PImage, OriginOffset
+from donkeycar.parts.controller import JoystickController
+from donkeycar.parts.path import CsvPath, RosPath, PathPlot, CTE, PID_Pilot, PlotCircle, PImage, OriginOffset
 from donkeycar.parts.transform import PIDController
 from donkeycar.parts.kinematics import TwoWheelSteeringThrottle
 from donkeycar.templates.complete import add_odometry, add_camera, add_user_controller, add_drivetrain
@@ -116,7 +138,7 @@ def drive(cfg, use_joystick=False, camera_type='single'):
     # - it will optionally add any configured 'joystick' controller
     #
     has_input_controller = hasattr(cfg, "CONTROLLER_TYPE") and cfg.CONTROLLER_TYPE != "mock"
-    ctr = add_user_controller(V, cfg, use_joystick)
+    ctr = add_user_controller(V, cfg, use_joystick, input_image = 'map/image')
 
     #
     # This part will reset the car back to the origin. You must put the car in the known origin
@@ -151,7 +173,7 @@ def drive(cfg, use_joystick=False, camera_type='single'):
 
     # This is the path object. It will record a path when distance changes and it travels
     # at least cfg.PATH_MIN_DIST meters. Except when we are in follow mode, see below...
-    path = Path(min_dist=cfg.PATH_MIN_DIST)
+    path = CsvPath(min_dist=cfg.PATH_MIN_DIST)
     V.add(path, inputs=['pos/x', 'pos/y'], outputs=['path'], run_condition='run_user')
 
     lpos = LoggerPart(inputs=['pos/x', 'pos/y'], level="DEBUG", logger="position")
@@ -159,28 +181,43 @@ def drive(cfg, use_joystick=False, camera_type='single'):
 
     # When a path is loaded, we will be in follow mode. We will not record.
     path_loaded = False
-    if os.path.exists(cfg.PATH_FILENAME):
-        path.load(cfg.PATH_FILENAME)
-        path_loaded = True
+#    if os.path.exists(cfg.PATH_FILENAME):
+#        path.load(cfg.PATH_FILENAME)
+#        path_loaded = True
 
     def save_path():
-        path.save(cfg.PATH_FILENAME)
-        print("saved path:", cfg.PATH_FILENAME)
+        if path.length() > 0:
+            if path.save(cfg.PATH_FILENAME):
+                print("That path was saved to ", cfg.PATH_FILENAME)
+            else:
+                print("The path could NOT be saved; check the PATH_FILENAME in myconfig.py to make sure it is a legal path")
+        else:
+            print("There is no path to save; try recording the path.")
+
+    def load_path():
+       if path.load(cfg.PATH_FILENAME):
+           path_loaded = True
+           mode = 'user'
+           print("The path was loaded was loaded from ", cfg.PATH_FILENAME)
+       else:
+           print("path _not_ loaded; make sure you have saved a path.")
 
     def erase_path():
         global mode, path_loaded
-        if os.path.exists(cfg.PATH_FILENAME):
-            os.remove(cfg.PATH_FILENAME)
+        origin_reset.init_to_last
+        if path.reset():
             mode = 'user'
             path_loaded = False
-            print("erased path", cfg.PATH_FILENAME)
+            print("The origin and the path were reset; you are ready to record a new path.")
         else:
-            print("no path found to erase")
-    
-    def reset_origin():
-        print("Resetting origin")
-        origin_reset.init_to_last
+            print("The origin was reset; you are ready to record a new path.")
 
+    def reset_origin():
+        """
+        Reset effective pose to (0, 0)
+        """
+        origin_reset.init_to_last
+        print("The origin was reset to the current position.")
 
     # Here's an image we can map to.
     img = PImage(clear_each_frame=True)
@@ -217,6 +254,9 @@ def drive(cfg, use_joystick=False, camera_type='single'):
         # this process. Restart and the path will be loaded.
         ctr.set_button_down_trigger(cfg.SAVE_PATH_BTN, save_path)
 
+        # allow controller to (re)load the path
+        ctr.set_button_down_trigger(cfg.LOAD_PATH_BTN, load_path)
+
         # Here's a trigger to erase a previously saved path. 
         ctr.set_button_down_trigger(cfg.ERASE_PATH_BTN, erase_path)
 
@@ -226,7 +266,7 @@ def drive(cfg, use_joystick=False, camera_type='single'):
         # Buttons to tune PID constants
         ctr.set_button_down_trigger("L2", dec_pid_d)
         ctr.set_button_down_trigger("R2", inc_pid_d)
-    
+
 
     #Choose what inputs should change the car.
     class DriveMode:
@@ -236,18 +276,15 @@ def drive(cfg, use_joystick=False, camera_type='single'):
             if mode == 'user':
                 #print(user_angle, user_throttle)
                 return user_angle, user_throttle
-            
             elif mode == 'local_angle':
                 return pilot_angle, user_throttle
-            
-            else: 
+            else:
                 return pilot_angle, pilot_throttle
-        
+
     V.add(DriveMode(), 
           inputs=['user/mode', 'user/angle', 'user/throttle',
                   'pilot/angle', 'pilot/throttle'], 
           outputs=['angle', 'throttle'])
-    
 
     #
     # To make differential drive steer, 
@@ -267,38 +304,14 @@ def drive(cfg, use_joystick=False, camera_type='single'):
     if ctr is not None and isinstance(ctr, JoystickController):
         ctr.print_controls()
 
-    if path_loaded:
-        print("###############################################################################")
-        print("Loaded path:", cfg.PATH_FILENAME)
-        print("Make sure your car is sitting at the origin of the path.")
-        print("View web page and refresh. You should see your path.")
-        print("Hit 'select' twice to change to ai drive mode.")
-        print("You can press the X button (e-stop) to stop the car at any time.")
-        print("Delete file", cfg.PATH_FILENAME, "and re-start")
-        print("to record a new path.")
-        print("###############################################################################")
-        carcolor = "blue"
-        loc_plot = PlotCircle(scale=cfg.PATH_SCALE, offset=cfg.PATH_OFFSET, color = carcolor)
-        V.add(loc_plot, inputs=['map/image', 'pos/x', 'pos/y'], outputs=['map/image'])
+    #
+    # draw a map image as the vehicle moves
+    #
+    loc_plot = PlotCircle(scale=cfg.PATH_SCALE, offset=cfg.PATH_OFFSET, color = "blue")
+    V.add(loc_plot, inputs=['map/image', 'pos/x', 'pos/y'], outputs=['map/image'], run_condition='run_pilot')
 
-    else:
-        print("###############################################################################")
-        print("You are now in record mode. Open the web page to your car")
-        print("and as you drive you should see a path.")
-        print("Complete one circuit of your course.")
-        print("When you have exactly looped, or just shy of the ")
-        print("loop, then save the path (press %s)." % cfg.SAVE_PATH_BTN)
-        print("You can also erase a path with the Triangle button.")
-        print("When you're done, close this process with Ctrl+C.")
-        print("Place car exactly at the start. ")
-        print("Then restart the car with 'python manage drive'.")
-        print("It will reload the path and you will be ready to  ")
-        print("follow the path using  'select' to change to ai drive mode.")
-        print("You can also press the Square button to reset the origin")
-        print("###############################################################################")
-        carcolor = 'green'
-        loc_plot = PlotCircle(scale=cfg.PATH_SCALE, offset=cfg.PATH_OFFSET, color = carcolor)
-        V.add(loc_plot, inputs=['map/image', 'pos/x', 'pos/y'], outputs=['map/image'])
+    loc_plot = PlotCircle(scale=cfg.PATH_SCALE, offset=cfg.PATH_OFFSET, color = "green")
+    V.add(loc_plot, inputs=['map/image', 'pos/x', 'pos/y'], outputs=['map/image'], run_condition='run_user')
 
     V.start(rate_hz=cfg.DRIVE_LOOP_HZ, 
         max_loop_count=cfg.MAX_LOOPS)
@@ -314,7 +327,7 @@ if __name__ == '__main__':
         raise ValueError('Invalid log level: %s' % log_level)
     logging.basicConfig(level=numeric_level)
 
-    
+
     if args['drive']:
         drive(cfg, use_joystick=args['--js'], camera_type=args['--camera'])
 

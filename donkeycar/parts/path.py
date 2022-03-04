@@ -1,15 +1,15 @@
 import pickle
 import math
 import logging
-
+import pathlib
 import numpy
 from PIL import Image, ImageDraw
 
 from donkeycar.utils import norm_deg, dist, deg2rad, arr_to_img, is_number_type
 
 
-class Path(object):
-    def __init__(self, min_dist = 1.):
+class AbstractPath:
+    def __init__(self, min_dist=1.):
         self.path = []
         self.min_dist = min_dist
         self.x = math.inf
@@ -17,25 +17,80 @@ class Path(object):
         self.recording = True
 
     def run(self, x, y):
-        if self.recording: 
-            if is_number_type(x) and is_number_type(y):
-                d = dist(x, y, self.x, self.y)
-                if d >= self.min_dist:
-                    self.path.append((x, y))
-                    self.x = x
-                    self.y = y
-                    logging.info("path point (%f, %f)" % ( x, y))
-
+        d = dist(x, y, self.x, self.y)
+        if self.recording and d > self.min_dist:
+            self.path.append((x, y))
+            logging.info("path point (%f, %f)" % (x, y))
+            self.x = x
+            self.y = y
         return self.path
+
+    def length(self):
+        return len(self.path)
+
+    def is_empty(self):
+        return 0 == self.length()
+
+    def is_loaded(self):
+        return not self.is_empty()
+
+    def get_xy(self):
+        return self.path
+
+    def reset(self):
+        self.path = []
+        return True
+
+    def save(self, filename):
+        return False
+
+    def load(self, filename):
+        return False
+
+
+class CsvPath(AbstractPath):
+    def __init__(self, min_dist=1.):
+        super().__init__(min_dist)
+
+    def save(self, filename):
+        if self.length() > 0:
+            with open(filename, 'w') as outfile:
+                for (x, y) in self.path:
+                    outfile.write(f"{x}, {y}\n")
+            return True
+        else:
+            return False
+
+    def load(self, filename):
+        path = pathlib.Path(filename)
+        if path.is_file():
+            with open(filename, "r") as infile:
+                self.path = []
+                for line in infile:
+                    xy = [float(i.strip()) for i in line.strip().split(sep=",")]
+                    self.path.append((xy[0], xy[1]))
+            return True
+        else:
+            logging.info(f"File '{filename}' does not exist")
+            return False
+
+        self.recording = False
+
+
+class RosPath(AbstractPath):
+    def __init__(self, min_dist=1.):
+        super().__init__(self, min_dist)
 
     def save(self, filename):
         outfile = open(filename, 'wb')
         pickle.dump(self.path, outfile)
-    
+        return True
+
     def load(self, filename):
         infile = open(filename, 'rb')
         self.path = pickle.load(infile)
         self.recording = False
+        return True
 
 class PImage(object):
     def __init__(self, resolution=(500, 500), color="white", clear_each_frame=False):
@@ -59,13 +114,15 @@ class OriginOffset(object):
     def __init__(self):
         self.ox = 0.0
         self.oy = 0.0
-        self.last_x = 0.
-        self.last_y = 0.
+        self.last_x = 0.0
+        self.last_y = 0.0
 
     def run(self, x, y):
         if is_number_type(x) and is_number_type(y):
             self.last_x = x
             self.last_y = y
+        else:
+            logging.info("OriginOffset ignoring non-number")
 
         return self.last_x + self.ox, self.last_y + self.oy
 
