@@ -8,7 +8,7 @@ class LoggerPart:
     """
     def __init__(self, inputs: List[str], level: str="INFO", rate: int=1, logger=None):
         self.inputs = inputs
-        self.rate = rat
+        self.rate = rate
         self.level = logging._nameToLevel.get(level, logging.INFO)
         self.logger = logging.getLogger(logger if logger is not None else "LoggerPart")
 
