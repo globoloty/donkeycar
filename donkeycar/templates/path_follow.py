@@ -169,21 +169,19 @@ def drive(cfg, use_joystick=False, camera_type='single'):
 
     V.add(PilotCondition(), inputs=['user/mode'], outputs=['run_pilot'])
 
-
-
     # This is the path object. It will record a path when distance changes and it travels
     # at least cfg.PATH_MIN_DIST meters. Except when we are in follow mode, see below...
     path = CsvPath(min_dist=cfg.PATH_MIN_DIST)
     V.add(path, inputs=['pos/x', 'pos/y'], outputs=['path'], run_condition='run_user')
 
-    lpos = LoggerPart(inputs=['pos/x', 'pos/y'], level="DEBUG", logger="position")
+    lpos = LoggerPart(inputs=['pos/x', 'pos/y'], level="INFO", logger="position")
     V.add(lpos, inputs=lpos.inputs)
 
     # When a path is loaded, we will be in follow mode. We will not record.
     path_loaded = False
-#    if os.path.exists(cfg.PATH_FILENAME):
-#        path.load(cfg.PATH_FILENAME)
-#        path_loaded = True
+    if os.path.exists(cfg.PATH_FILENAME):
+        path.load(cfg.PATH_FILENAME)
+        path_loaded = True
 
     def save_path():
         if path.length() > 0:
